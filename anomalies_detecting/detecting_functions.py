@@ -112,8 +112,8 @@ def check_numbering_sequence(df: pd.DataFrame) -> Dict:
 
 def detect_location_changes(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Анализирует смену местоположения (geo_city_id и ip) для каждого пользователя.
-    Возвращает DataFrame с информацией о сменах местоположения и временных интервалах.
+    Анализирует смену местоположения (geo_city_id и ip) для каждого пользователя,
+    учитывая только реальные изменения значений.
     """
     df_sorted = df.sort_values(['randPAS_user_passport_id', 'ts'])
     grouped = df_sorted.groupby('randPAS_user_passport_id')
@@ -121,22 +121,29 @@ def detect_location_changes(df: pd.DataFrame) -> pd.DataFrame:
     results = []
 
     for user_id, group in grouped:
-        user_data = group[['ts', 'ip', 'geo_city_id']].drop_duplicates()
+        user_data = group[['ts', 'geo_city_id', 'ip']].drop_duplicates()
+        user_data = user_data.sort_values('ts')
 
-        changes = user_data[
-            (user_data['geo_city_id'].shift() != user_data['geo_city_id']) |
-            (user_data['ip'].shift() != user_data['ip'])
-            ].copy()
+        prev_city = user_data['geo_city_id'].shift()
+        prev_ip = user_data['ip'].shift()
+
+        city_changed = (user_data['geo_city_id'] != prev_city) & ~(user_data['geo_city_id'].isna() & prev_city.isna())
+        ip_changed = (user_data['ip'] != prev_ip) & ~(user_data['ip'].isna() & prev_ip.isna())
+
+        changes = user_data[city_changed | ip_changed].copy()
+
         if len(changes) > 1:
             changes['time_diff'] = changes['ts'].diff().dt.total_seconds()
-            city_changes = list(zip(
+
+            city_ip_changes = list(zip(
                 changes['geo_city_id'].astype(str),
+                changes['ip'].astype(str),
                 changes['time_diff'].astype(str)
             ))
 
             results.append({
                 'user_id': user_id,
-                'city_changes': " → ".join([f"{city} ({time}s)" for city, time in city_changes]),
+                'city_changes': " → ".join([f"{city}|{ip} ({time}s)" for city, ip, time in city_ip_changes]),
                 'change_count': len(changes) - 1,
                 'first_change': changes['ts'].iloc[1],
                 'last_change': changes['ts'].iloc[-1],
@@ -166,7 +173,7 @@ def analyze_city_activity(df, min_events=10, z_threshold=3, rolling_window='1H')
     city_activity = df.groupby(['geo_city_id', pd.Grouper(key='ts', freq=rolling_window)]) \
         .size() \
         .reset_index(name='event_count')
-    # print(city_activity)
+    
     city_stats = city_activity.groupby('geo_city_id')['event_count'].agg(['count', 'mean', 'std'])
     valid_cities = city_stats[city_stats['count'] > 5].index
     city_activity = city_activity[city_activity['geo_city_id'].isin(valid_cities)]
@@ -190,10 +197,10 @@ def analyze_city_activity(df, min_events=10, z_threshold=3, rolling_window='1H')
     anomalies = city_activity[city_activity['is_anomaly']].sort_values('z_score', ascending=False)
 
     return anomalies, city_activity
-
+    
 
 def detect_suspicious_ips(df: pd.DataFrame,
-                          max_users_per_ip: int = 10) -> pd.DataFrame:
+                          max_users_per_ip: int = 2) -> pd.DataFrame:
     """
     Обнаруживает IP-адреса с аномально большим количеством пользователей
 
@@ -219,7 +226,7 @@ def detect_suspicious_ips(df: pd.DataFrame,
     suspicious_ips['activity_period'] = suspicious_ips['last_seen'] - suspicious_ips['first_seen']
 
     return suspicious_ips.sort_values('unique_users', ascending=False)
-
+                              
 
 def detect_user_activity_spikes(df: pd.DataFrame,
                                 time_window_sec: int = 60,
@@ -291,26 +298,40 @@ def detect_anomalous_time_windows(df, threshold=1.5, window_size='1H'):
 
 def detect_anomalous_device_shares(df, threshold=1.5, window_size='30T'):
     """
-       Обнаруживает аномальные изменения в доле устройств по временным окнам.
+    Обнаруживает аномальные изменения в доле типов устройств по временным окнам.
 
-       Параметры:
-           df (pd.DataFrame): DataFrame с данными об устройствах.
-           threshold (float): Порог для обнаружения аномальных изменений в доле устройств.
-           window_size (str): Размер временного окна для анализа.
+    Параметры:
+        df (pd.DataFrame): DataFrame с данными об устройствах.
+        threshold (float): Порог для обнаружения аномалий.
+        window_size (str): Размер временного окна для анализа.
 
-       Возвращает:
-           pd.DataFrame: DataFrame с аномальными изменениями в доле устройств.
-       """
+    Возвращает:
+        tuple: (DataFrame с аномальными окнами, DataFrame с долями устройств)
+    """
     df = df.copy()
     df['ts'] = pd.to_datetime(df['ts'])
     df['time_window'] = df['ts'].dt.floor(window_size)
 
-    device_shares = df.groupby(['time_window', 'ua_device_family']).size().unstack().fillna(0)
+    def get_device_type(row):
+        if row['ua_is_mobile'] in [1, True]:
+            return 'Телефон'
+        elif row['ua_is_tablet'] in [1, True]:
+            return 'Планшет'
+        elif row['ua_is_pc'] in [1, True]:
+            return 'ПК'
+        else:
+            return 'Другое'
+
+    df['device_type'] = df.apply(get_device_type, axis=1)
+
+    device_shares = df.groupby(['time_window', 'device_type']).size().unstack().fillna(0)
     device_shares = device_shares.div(device_shares.sum(axis=1), axis=0)
+
     device_shares_change = device_shares.pct_change().abs().fillna(0)
 
     anomalous_windows = device_shares_change[device_shares_change.max(axis=1) > threshold]
-    return anomalous_windows
+
+    return anomalous_windows, device_shares
 
 
 def detect_anomalous_page_views(df, threshold=3, window_size='30T'):
@@ -318,45 +339,55 @@ def detect_anomalous_page_views(df, threshold=3, window_size='30T'):
     Обнаруживает аномальные изменения в количестве просмотров страниц по временным окнам.
 
     Параметры:
-        df (pd.DataFrame): DataFrame с данными о просмотрах страниц.
-        threshold (int): Порог для обнаружения аномальных изменений в количестве просмотров страниц.
-        window_size (str): Размер временного окна для анализа.
+        df (pd.DataFrame): DataFrame с данными о просмотрах страниц. Должен содержать 'ts', 'url', 'title'.
+        threshold (int): Порог для обнаружения аномалий.
+        window_size (str): Размер временного окна.
 
     Возвращает:
-        pd.DataFrame: DataFrame с аномальными изменениями в просмотрах страниц.
+        pd.DataFrame: Аномалии с колонками ['time_window', 'url', 'title', 'growth'].
     """
     df = df.copy()
     df['ts'] = pd.to_datetime(df['ts'])
     df['time_window'] = df['ts'].dt.floor(window_size)
+
+    titles = df.groupby(['time_window', 'url'])['title'].last().reset_index()
+
     page_views = df.groupby(['time_window', 'url'])['randPAS_user_passport_id'].nunique().unstack().fillna(0)
     page_views_change = page_views.pct_change().abs()
     page_views_change[page_views.shift(1) == 0] = np.nan
+
     anomalies = page_views_change[page_views_change > threshold].stack().reset_index()
     anomalies.columns = ['time_window', 'url', 'growth']
 
-    return anomalies.dropna()
+    anomalies = anomalies.merge(titles, on=['time_window', 'url'], how='left')
 
+    return anomalies.dropna(subset=['growth'])
 
-def detect_anomalous_users(df):
+def detect_anomalous_users(df, return_all=True):
     """
     Обнаруживает аномальных пользователей по времени, проведенному на страницах.
 
     Параметры:
         df (pd.DataFrame): DataFrame с данными о пользователях и времени их активности.
+        return_all (bool): Возвращать ли всех пользователей с флагом аномалии.
 
     Возвращает:
-        pd.DataFrame: DataFrame с аномальными пользователями.
+        pd.DataFrame: DataFrame с колонками ['randPAS_user_passport_id', 'avg_time_spent', 'is_anomalous'].
+                      Если return_all=False — только аномальные.
     """
-    user_page_times = df.groupby(['randPAS_user_passport_id', 'url'])['ts'].apply(lambda x: x.max() - x.min()).reset_index()
-
+    user_page_times = df.groupby(['randPAS_user_passport_id', 'url'])['ts'] \
+                        .apply(lambda x: x.max() - x.min()).reset_index()
 
     user_avg_times = user_page_times.groupby('randPAS_user_passport_id')['ts'].mean().reset_index()
     user_avg_times.columns = ['randPAS_user_passport_id', 'avg_time_spent']
-    model = IsolationForest(contamination=0.05, random_state=42)  # contamination - доля аномальных
-    user_avg_times['is_anomalous'] = model.fit_predict(user_avg_times[['avg_time_spent']])
-    anomalous_users = user_avg_times[user_avg_times['is_anomalous'] == -1]
 
-    return anomalous_users
+    model = IsolationForest(contamination=0.03, random_state=42)
+    user_avg_times['is_anomalous'] = model.fit_predict(user_avg_times[['avg_time_spent']])
+
+    if return_all:
+        return user_avg_times
+    else:
+        return user_avg_times[user_avg_times['is_anomalous'] == -1]
 
 
 def zscore_detector(data: np.ndarray, threshold: float = 3.0) -> np.ndarray:
@@ -487,21 +518,3 @@ def majority_anomaly_vote(*anomaly_arrays: np.ndarray) -> np.ndarray:
 
     return final_anomalies
 
-
-def plot_anomalies_comparison(data, **anomaly_dict):
-    """
-    Функция для построения графика сравнения методов обнаружения аномалий.
-
-    Параметры:
-        data: массив исходных данных
-        anomaly_dict: именованные массивы аномалий (где 1 - аномалия, 0 - нет)
-    """
-    plt.figure(figsize=(12, 6))
-    plt.scatter(range(len(data)), data, c='blue', label='Данные', alpha=0.5)
-    for method_name, anomalies in anomaly_dict.items():
-        anomaly_indices = np.where(anomalies == 1)[0]
-        plt.scatter(anomaly_indices, data[anomaly_indices], label=method_name, alpha=0.6)
-
-    plt.legend()
-    plt.title("Сравнение методов обнаружения аномалий")
-    plt.show()
