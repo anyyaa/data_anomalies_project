@@ -1,6 +1,14 @@
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
+import pandas as pd
+from typing import Dict, List, Union, Optional
+from datetime import timedelta
+import numpy as np
+from scipy import stats
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+
 
 
 def plot_location_change_distribution(location_changes_df, threshold=45):
@@ -262,3 +270,73 @@ def plot_device_share_changes(device_shares, anomalous_windows=None):
     plt.tight_layout()
     plt.show()
 
+
+def plot_user_activity_spikes(suspicious_users: pd.DataFrame, top_n: int = 20, exclude_top_outlier=True):
+    """
+    Визуализирует подозрительных пользователей по количеству быстрых действий.
+
+    Параметры:
+        suspicious_users: DataFrame, возвращаемый функцией detect_user_activity_spikes
+        top_n: сколько пользователей визуализировать
+        exclude_top_outlier: исключить ли самого аномального (чтобы не портил график)
+    """
+    if suspicious_users.empty:
+        print("Нет подозрительных пользователей для отображения.")
+        return
+
+    df_plot = suspicious_users.copy()
+
+    if exclude_top_outlier and len(df_plot) > 1:
+        top_outlier = df_plot.iloc[0]
+        second = df_plot.iloc[1]
+        if top_outlier['rapid_actions_count'] > second['rapid_actions_count'] * 2:
+            df_plot = df_plot.iloc[1:]  
+
+    df_plot = df_plot.head(top_n)
+
+    plt.figure(figsize=(14, 6))
+
+    sns.barplot(
+        data=df_plot,
+        x='randPAS_user_passport_id',
+        y='rapid_actions_count',
+        palette='Reds_r'
+    )
+
+    plt.title(f'Топ {top_n} подозрительных пользователей по быстрым действиям')
+    plt.ylabel('Кол-во быстрых действий')
+    plt.xlabel('ID пользователя')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y')
+
+    ax2 = plt.gca().twinx()
+    sns.lineplot(
+        data=df_plot,
+        x='randPAS_user_passport_id',
+        y='ip_count',
+        marker='o',
+        color='blue',
+        ax=ax2
+    )
+    ax2.set_ylabel('Кол-во уникальных IP')
+
+    plt.tight_layout()
+    plt.show()
+
+
+    """
+    Функция для построения графика сравнения методов обнаружения аномалий.
+
+    Параметры:
+        data: массив исходных данных
+        anomaly_dict: именованные массивы аномалий (где 1 - аномалия, 0 - нет)
+    """
+    plt.figure(figsize=(12, 6))
+    plt.scatter(range(len(data)), data, c='blue', label='Данные', alpha=0.5)
+    for method_name, anomalies in anomaly_dict.items():
+        anomaly_indices = np.where(anomalies == 1)[0]
+        plt.scatter(anomaly_indices, data[anomaly_indices], label=method_name, alpha=0.6)
+
+    plt.legend()
+    plt.title("Сравнение методов обнаружения аномалий")
+    plt.show()
