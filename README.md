@@ -27,7 +27,7 @@
   - `sklearn.neighbors.LocalOutlierFactor`
   - `sklearn.ensemble.IsolationForest`
 
-## Методы анализа
+## Методы анализа. Описание функций
 ### 1. Статистические методы
 - **check_duplicate_events**  
   • Назначение: Поиск дубликатов событий с одинаковыми временными метками и типами событий  
